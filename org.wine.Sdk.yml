@@ -310,7 +310,7 @@ modules:
         submodules: true
         x-checker-data:
           type: git
-          tag-pattern: ^FEX-(\d+(\.\d+)?)$
+          tag-pattern: ^FEX-(\d+(?:\.\d+)?)$
     build-options:
       append-path: /usr/lib/llvm-mingw/bin:/usr/lib/sdk/mingw-w64/bin
       env:
@@ -535,7 +535,7 @@ modules:
         sha256: 91cb8e6aacc4db5983a7e0a6d4428d4530621830e9f31b4ef99602eb30ebb22f
         x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
           type: html
-          url: https://github.com/pythonlover02/DXVK-Sarek/tags                                                                     # Use this file to...
+          url: https://github.com/pythonlover02/DXVK-Sarek/releases                                                                    # Use this file to...
           version-pattern: /pythonlover02/DXVK-Sarek/releases/tag/v(\d[\d\.]+\d)                                                    # Search for this regex pattern
           url-template: https://github.com/pythonlover02/DXVK-Sarek/releases/download/v$version/dxvk-sarek-dyasync-v$version.tar.gz # Compare this file (found using regex match from above) to the source to see if there is a newer version
 
