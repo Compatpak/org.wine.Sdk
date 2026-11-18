@@ -1,0 +1,740 @@
+id: org.wine.Sdk
+id-platform: org.wine.Platform
+build-runtime: true
+branch: &app-version '11.15'
+sdk: org.freedesktop.Sdk
+runtime: org.freedesktop.Platform
+runtime-version: &runtime-version '26.08'
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.mingw-w64 # Needed for cross-compiling 32/64bit Wine (Compiling Wine Windows dlls, fex-wine and rpc-bridge)
+  - org.freedesktop.Sdk.Extension.vala      # Needed for building msitools
+# platform-extensions:
+#   - org.freedesktop.Platform.Locale
+# Re-export org.freedesktop.Platform extensions for child Apps to inherit
+inherit-extensions:
+  - org.freedesktop.Platform.GL           # OpenGL
+  - org.freedesktop.Platform.VulkanLayer  # Vulkan layers like MangoHud, Gamescope, etc
+  - org.freedesktop.Platform.Timezones    # Timezone data
+  - org.freedesktop.Platform.GStreamer    # GStreamer codec plugins
+  - org.freedesktop.Platform.codecs-extra # Video codecs like H.264, H.265, etc
+  - org.freedesktop.Platform.Icontheme    # Icon theme assets like Breeze, Adwaita, etc
+# inherit-sdk-extensions:
+#   - org.freedesktop.Sdk.Extension
+# Re-export org.freedesktop.Platform extensions for child Apps to inherit
+add-extensions:
+  # Codecs (replaces ffmpeg-full & openh264)
+  org.freedesktop.Platform.codecs-extra:
+    directory: lib/codecs
+    add-ld-path: lib
+    version: 25.08-extra
+    no-autodownload: true
+    autodelete: false
+modules:
+  # Setting up required stuff
+  - name: Setup
+    buildsystem: simple
+    build-commands:
+      - |
+        # Make directories needed by extensions
+        mkdir -p ${FLATPAK_DEST}/lib/codecs # Codecs (replaces ffmpeg-full & openh264)
+
+        # Make docs directories needed by modules
+        mkdir -p ${FLATPAK_DEST}/share/runtime/docs/man  # /usr/share/man symlinks here but it is not created by default and can cause errors when building modules
+        mkdir -p ${FLATPAK_DEST}/share/runtime/docs/info # /usr/share/info symlinks here but it is not created by default and can cause errors when building modules
+        mkdir -p ${FLATPAK_DEST}/share/runtime/docs/doc  # /usr/share/doc symlinks here but it is not created by default and can cause errors when building modules
+        mkdir -p ${FLATPAK_DEST}/share/runtime/docs/ri   # /usr/share/ri symlinks here but it is not created by default and can cause errors when building modules
+
+        # Make locale directories needed by modules
+        pushd ${FLATPAK_DEST}/share/locale
+        for link in `find . -type l`; do
+          mkdir -p $(readlink  $link)
+        done
+        popd
+
+  # LLVM Clang compiler, needed for compiling some wine --enable-archs backends on ARM and fex-wine
+  - name: llvm-mingw
+    only-arches:
+      - aarch64 # Only build this module when building on ARM
+    sources:
+      - type: archive
+        url: https://github.com/mstorsjo/llvm-mingw/releases/download/20261117/llvm-mingw-20261117-ucrt-ubuntu-22.04-aarch64.tar.xz
+        sha256: 6d9442ead9ace3b3e4c3389bfef69f93f873305e0705e6cc60978ac895320872
+        strip-components: 1
+        x-checker-data:
+          type: json
+          url: https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest
+          tag-query: .tag_name
+          version-query: .tag_name
+          url-query: >-
+            .assets[] | select(.name == "llvm-mingw-" + $version + "-ucrt-ubuntu-22.04-aarch64.tar.xz")
+            | .browser_download_url
+    buildsystem: simple
+    build-commands:
+      - mkdir -p ${FLATPAK_DEST}/lib/llvm-mingw
+      - cp -a . ${FLATPAK_DEST}/lib/llvm-mingw/
+
+  # For OpenGL rendering in bitmaps (Optional Wine dependency) (An old version of mesa, good enough for building the libosmesa part we need)
+  - name: libosmesa
+    sources:
+      - type: git
+        url: https://gitlab.freedesktop.org/mesa/mesa.git
+        tag: mesa-20.2.6
+        commit: 7b866d516a7dc0a36dc8ea7ce7733414294e26d9
+    config-opts:
+      - -Dosmesa=classic     # Only works because we are using old mesa 20.2.6 (If updated will need to be osmesa=true)
+      - -Ddri-drivers=[]
+      - -Dgallium-drivers=[]
+      - -Dvulkan-drivers=[]
+      - -Dplatforms=[]
+    buildsystem: meson
+
+  # For parallel programming (Optional Wine dependency)
+  - name: opencl
+    sources:
+      - type: git
+        url: https://github.com/KhronosGroup/OpenCL-Headers.git
+        tag: v2026.05.29
+        commit: 6fe718c31a45fe25151362a72ef041c3a1047cbd
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^v(\d[\d\.]+\d)$ # Regex pattern that matches latest git tag and compares it to source
+    buildsystem: cmake
+
+  # For handling network traffic/packet capture (Optional Wine dependency)
+  - name: libpcap
+    sources:
+      - type: git
+        url: https://github.com/the-tcpdump-group/libpcap.git
+        tag: libpcap-1.11.0
+        commit: 87b6a456dd7ac9e34231f8a0a3f99a13a59b4419
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^libpcap-(\d[\d\.]+\d)$ # Regex pattern that matches latest git tag and compares it to source
+
+  # Middleware for access smart cards (Optional Wine dependency)
+  - name: libpcsclite
+    sources:
+      - type: git
+        url: https://github.com/LudovicRousseau/PCSC.git
+        tag: 2.5.4
+        commit: a9848cc4f119903f338fb3231c030640d7ca8932
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^(\d[\d\.]+\d)$ # Regex pattern that matches latest git tag and compares it to source
+    config-opts:
+      - -Dpolkit=false
+      - -Dlibsystemd=false
+    buildsystem: meson
+
+  # For handling scanners (Optional Wine dependency)
+  - name: libsane
+    sources:
+      - type: git
+        url: https://gitlab.com/sane-project/backends.git
+        tag: 1.4.0
+        commit: c7e4b5e35e3d614d2b1181d760a717bfc395a203
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^(\d[\d\.]+\d)$ # Regex pattern that matches latest git tag and compares it to source
+
+  # For handling USB devices (Optional Wine dependency)
+  - name: libusb
+    sources:
+      - type: git
+        url: https://github.com/libusb/libusb.git
+        tag: v1.0.30
+        commit: 87a55632db62c9bdc58cd31d3ccfa673f1bb017f
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^v(\d[\d\.]+\d)$ # Regex pattern that matches latest git tag and compares it to source
+
+  # For handling digital cameras (Optional Wine dependency)
+  - name: libgphoto2
+    sources:
+      - type: archive
+        url: https://github.com/gphoto/libgphoto2/releases/download/v2.5.34/libgphoto2-2.5.34.tar.xz
+        sha256: 51993f5d9bfb6b4e5925cbbe5883085791bff6f81bcacb8ffe1b783ce76d586a
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://raw.githubusercontent.com/gphoto/libgphoto2/refs/heads/master/NEWS                           # Use this file to...
+          version-pattern: libgphoto2\s(\d[\d\.]+\d)\srelease                                                       # Search for this regex pattern
+          url-template: https://github.com/gphoto/libgphoto2/releases/download/v$version/libgphoto2-$version.tar.xz # Compare this file (found using regex match from above) to the source to see if there is a newer version
+
+  # For handling ISDN devices (Optional Wine dependency)
+  - name: libcapi20
+    sources:
+      - type: archive
+        url: https://deb.debian.org/debian/pool/main/libc/libcapi20-3/libcapi20-3_3.27.orig.tar.bz2
+        sha256: d8e423d5adba1750f511a2c088296db2a8a2e1e9209401871b01ce411d8ac583
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://deb.debian.org/debian/pool/main/libc/libcapi20-3/ # Use this file to...
+          pattern: (libcapi20-3_(\d[\d\.]+\d).orig.tar.bz2)              # Search for this regex pattern and compare it to source to see if there is a newer version
+      # Needed because libcapi's config.guess is outdated and doesn't recognize aarch64 architecture
+      - type: file
+        url: https://git.savannah.gnu.org/cgit/config.git/plain/config.guess
+        sha256: ac18bbd7dc3769e1646af49ebba331a391829f4a73579b735dc8d439bd1c7f07
+        dest-filename: config.guess
+        only-archs:
+          - aarch64 # Only use this source when building on ARM
+      # Needed because libcapi's config.sub is outdated and doesn't recognize aarch64 architecture
+      - type: file
+        url: https://git.savannah.gnu.org/cgit/config.git/plain/config.sub
+        sha256: f9a31e9a3f5b7cbeb8d8c3f2015895a51e7222130114c9c363fcbccd78e4bf6b
+        dest-filename: config.sub
+        only-archs:
+          - aarch64 # Only use this source when building on ARM
+
+  # For Kerberos authentication protocol (Optional Wine dependency)
+  - name: krb5
+    sources:
+      - type: archive
+        url: https://kerberos.org/dist/krb5/1.22/krb5-1.22.3.tar.gz
+        sha256: fe90af8441ad9fa9b064b8e53077cefb782a96f8a68276b031dc54af1789ff0b
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://kerberos.org/dist/                                                 # Use this file to...
+          version-pattern: Kerberos V5 Release (\d[\d\.]+\d) - current release            # Search for this regex pattern
+          url-template: https://kerberos.org/dist/krb5/$major.$minor/krb5-$version.tar.gz # Compare this file (found using regex match from above) to the source to see if there is a newer version
+    subdir: src # krb5 has the source code in a subdir called src
+
+  # A Perl driver (Mandatory Samba dependency)
+  - name: perl-parse-yapp
+    sources:
+      - type: archive
+        url: https://cpan.metacpan.org/authors/id/W/WB/WBRASWELL/Parse-Yapp-1.21.tar.gz
+        sha256: 3810e998308fba2e0f4f26043035032b027ce51ce5c8a52a8b8e340ca65f13e5
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://cpan.metacpan.org/authors/id/W/WB/WBRASWELL/ # Use this file to...
+          pattern: (Parse-Yapp-(\d[\d\.]+\d).tar.gz)                # Search for this regex pattern and compare it to source to see if there is a newer version
+    buildsystem: simple
+    build-commands:
+      - |
+        perl Makefile.PL
+        make
+        make install
+
+  # For SMB networking protocol (Optional libnetapi Wine dependency)
+  - name: samba
+    sources:
+      - type: archive
+        url: https://download.samba.org/pub/samba/stable/samba-4.25.1.tar.gz
+        sha256: 7f367545bca69aa96897628f82f0f04d4b66b3bcb36cb978b9bb952c4b4c428d
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://download.samba.org/pub/samba/stable/ # Use this file to...
+          pattern: (samba-(\d[\d\.]+\d).tar.gz)             # Search for this regex pattern and compare it to source to see if there is a newer version
+    config-opts:
+      - --localstatedir=/var
+      - --sharedstatedir=/var/lib
+      - --enable-fhs
+      - --without-ldap
+      - --without-ldb-lmdb
+      - --without-json
+      - --without-ad-dc
+      - --without-ads
+      - --without-pam
+
+  # For Open Database Connectivity, talking to SQL type databases (Optional Wine dependency)
+  - name: unixodbc
+    sources:
+      - type: git
+        url: https://github.com/lurcher/unixODBC.git
+        tag: v2.3.14
+        commit: 9a814155d60c44632b23d7b1bb47b17206e21db0
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^v(\d[\d\.]+\d)$ # Regex pattern that matches latest git tag and compares it to source
+
+  - name: wine
+    sources:
+      - type: git
+        url: https://gitlab.winehq.org/wine/wine.git
+        tag: wine-11.22
+        commit: 9f8c4ae4d35c7ff4153267aba9618c026f5f5583
+        is-main-source: true
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^wine-(\d+\.\d+)$ # Regex pattern that matches latest git tag and compares it to source
+
+      # Wine Staging, bleeding edge wine patches
+      - type: git
+        url: https://gitlab.winehq.org/wine/wine-staging.git
+        tag: v11.22
+        commit: 40ab84054fe2ead6c689de31405ba36269e9ee3a
+        dest: wine-staging
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^v(\d+\.\d+)$ # Regex pattern that matches latest git tag and compares it to source
+
+      # Script that runs before build and applies the above wine-staging patches
+      - type: shell
+        commands:
+          - ./wine-staging/staging/patchinstall.py DESTDIR="./" --all
+    build-options:
+      arch:
+        x86_64: # Use these options when building on x86_64
+          append-path: /usr/lib/sdk/mingw-w64/bin # Add to PATH, /usr/lib/sdk/mingw-w64/bin contains x86_64-w64-mingw32-gcc and i686-w64-mingw32-gcc compilers from sdk-extension org.freedesktop.Sdk.Extension.mingw-w64
+          config-opts:
+            - --prefix=${FLATPAK_DEST}
+            - --enable-archs=x86_64,i386 # Build for x86_64 - 64bit x86 dll/exe, i386 - 32bit x86 dll/exe (Builds in WoW64 mode because 32bit is included)
+            - --with-mingw               # Needed for the PE-format builds WoW64 requires (ntdll etc.)
+            - --disable-winemenubuilder
+            - --disable-tests
+        aarch64: # Use these options when building on ARM
+          append-path: /usr/lib/llvm-mingw/bin # Add llvm-mingw compiler to the path
+          config-opts:
+            - --prefix=${FLATPAK_DEST}
+            - --enable-archs=aarch64,arm,arm64ec,i386 # Build for aarch64 - 64bit ARM dll/exe, arm - 32bit ARM dll/exe, arm64ec - Native 64bit x86 Windows dll/exe rebuilt for running on ARM, i386 - 32bit x86 dll/exe (Builds in WoW64 mode because 32bit is included)
+            - --with-mingw=clang                      # Use LLVM/Clang compilers (Some --enable-archs require this)
+            - --disable-winemenubuilder
+            - --disable-tests
+          cflags: -fno-stack-protector # Override org.freedesktop.Sdk default -fstack-protector-strong (Can cause segmentation faults on ARM without this)
+      libdir: /usr/lib
+      env:
+        LIBDIR: lib
+    make-install-args:
+      - LDCONFIG=/bin/true                # When make install calls ldconfig return true (Default can cause problems when building in a Flatpak)
+      - UPDATE_DESKTOP_DATABASE=/bin/true # When make install calls update-desktop-database return true (Default can cause problems when building in a Flatpak)
+      - INSTALL_PROGRAM_FLAGS=-s          # Strip debug symbols from binaries when installed
+
+  # FEX x86 to ARM emulator backend for wine, allows running 32/64bit x86 exe/dll files on ARM. Replaces wine's xtajit.dll and xtajit64.dll
+  - name: fex-wine
+    only-arches:
+      - aarch64 # Only build this module when building on ARM
+    sources:
+      - type: git
+        url: https://github.com/FEX-Emu/FEX.git
+        tag: FEX-2608
+        submodules: true
+        x-checker-data:
+          type: git
+          tag-pattern: ^FEX-(\d+(\.\d+)?)$
+    build-options:
+      append-path: /usr/lib/llvm-mingw/bin:/usr/lib/sdk/mingw-w64/bin
+      env:
+        CC: clang
+        CXX: clang++
+    buildsystem: simple
+    build-commands:
+      - |
+        unset CFLAGS CXXFLAGS LDFLAGS ASFLAGS # Unset default Flatpak flags (They cause errors here)
+
+        # WoW64 32bit backend (Allows running 32bit x86 dll/exe)
+        mkdir build-wow64
+        cd build-wow64
+        cmake -GNinja \
+          -DCMAKE_TOOLCHAIN_FILE=../Data/CMake/toolchain_mingw.cmake \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DMINGW_TRIPLE=aarch64-w64-mingw32 \
+          -DENABLE_LTO=False \
+          -DBUILD_TESTS=False \
+          -DBUILD_TESTING=False \
+          -DENABLE_JEMALLOC_GLIBC_ALLOC=False \
+          -DTUNE_CPU=none \
+          ..
+        ninja wow64fex
+        install -Dm755 Bin/libwow64fex.dll ${FLATPAK_DEST}/lib/wine/aarch64-windows/xtajit.dll # Install/rename the wow64 fex-wine dll in place of the Windows expected xtajit dll
+        cd ..
+
+        # ARM64EC 64bit backend (Allows running 64bit x86 dll/exe)
+        mkdir build-arm64ec
+        cd build-arm64ec
+        cmake -GNinja \
+          -DCMAKE_TOOLCHAIN_FILE=../Data/CMake/toolchain_mingw.cmake \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DMINGW_TRIPLE=arm64ec-w64-mingw32 \
+          -DENABLE_LTO=False \
+          -DBUILD_TESTS=False \
+          -DBUILD_TESTING=False \
+          -DENABLE_JEMALLOC_GLIBC_ALLOC=False \
+          -DTUNE_CPU=none \
+          ..
+        ninja arm64ecfex
+        install -Dm755 Bin/libarm64ecfex.dll ${FLATPAK_DEST}/lib/wine/aarch64-windows/xtajit64.dll # Install/rename the arm64ec fex-wine dll in place of the Windows expected xtajit64 dll
+        cd ..
+
+  # Wine addon that allows opening website content
+  - name: wine-gecko
+    sources:
+      - type: archive
+        url: https://dl.winehq.org/wine/wine-gecko/2.47.4/wine-gecko-2.47.4-x86.tar.xz
+        sha256: 2cfc8d5c948602e21eff8a78613e1826f2d033df9672cace87fed56e8310afb6
+        strip-components: 0
+        # TODO: Keep tabs that the URL below is good for getting the correct latest version (URL below uses the master version of Wine not the specific version used above and could possibly update Wine Gecko to a newer version before the used Wine version is ready)
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://gitlab.winehq.org/wine/wine/-/raw/master/dlls/appwiz.cpl/addons.c              # Use this file to...
+          version-pattern: GECKO_VERSION\s+"(\d[\d\.]+\d)"                                            # Search for this regex pattern
+          url-template: https://dl.winehq.org/wine/wine-gecko/$version/wine-gecko-$version-x86.tar.xz # Compare this file (found using regex match from above) to the source to see if there is a newer version
+
+      - type: archive
+        url: https://dl.winehq.org/wine/wine-gecko/2.47.4/wine-gecko-2.47.4-x86_64.tar.xz
+        sha256: fd88fc7e537d058d7a8abf0c1ebc90c574892a466de86706a26d254710a82814
+        strip-components: 0
+        # TODO: Keep tabs that the URL below is good for getting the correct latest version (URL below uses the master version of Wine not the specific version used above and could possibly update Wine Gecko to a newer version before the used Wine version is ready)
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://gitlab.winehq.org/wine/wine/-/raw/master/dlls/appwiz.cpl/addons.c                 # Use this file to...
+          version-pattern: GECKO_VERSION\s+"(\d[\d\.]+\d)"                                               # Search for this regex pattern
+          url-template: https://dl.winehq.org/wine/wine-gecko/$version/wine-gecko-$version-x86_64.tar.xz # Compare this file (found using regex match from above) to the source to see if there is a newer version
+    buildsystem: simple
+    build-commands:
+      - |
+        mkdir -p ${FLATPAK_DEST}/share/wine/gecko/           # Make directory path for Wine Gecko
+        cp -a wine-gecko-* ${FLATPAK_DEST}/share/wine/gecko/ # Copy Wine Gecko directories keeping file permissions the same
+
+  # Wine addon that replaces the default .NET framework
+  - name: wine-mono
+    sources:
+      - type: archive
+        url: https://dl.winehq.org/wine/wine-mono/11.3.0/wine-mono-11.3.0-x86.tar.xz
+        sha256: 54a1b0111c3fe4b785eae688af94d27e64995707ad648b6fee8000381b80d298
+        strip-components: 0
+        # TODO: Keep tabs that the URL below is good for getting the correct latest version (URL below uses the master version of Wine not the specific version used above and could possibly update Wine Mono to a newer version before the used Wine version is ready)
+        x-checker-data:                                                                             # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://gitlab.winehq.org/wine/wine/-/raw/master/dlls/appwiz.cpl/addons.c            # Use this file to...
+          version-pattern: MONO_VERSION\s+"(\d[\d\.]+\d)"                                           # Search for this regex pattern
+          url-template: https://dl.winehq.org/wine/wine-mono/$version/wine-mono-$version-x86.tar.xz # Compare this file (found using regex match from above) to the source to see if there is a newer version
+    buildsystem: simple
+    build-commands:
+      - |
+        mkdir -p ${FLATPAK_DEST}/share/wine/mono/          # Make directory path for Wine Mono
+        cp -a wine-mono-* ${FLATPAK_DEST}/share/wine/mono/ # Copy Wine Mono directory keeping file permissions the same
+
+  # For helping to download and install various libraries, fonts, etc into a Wine prefix
+  - name: winetricks
+    sources:
+      - type: git
+        url: https://github.com/Winetricks/winetricks.git
+        tag: '20260125'
+        commit: b76e1ee79ac57d7aceb384f74518fc423265810c
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^(\d+)$ # Regex pattern that matches latest git tag and compares it to source
+    buildsystem: simple
+    build-commands:
+      - |
+        make
+        make install
+
+  # For extracting Microsoft Cabinet files (used by Wine Tricks)
+  - name: cabextract
+    sources:
+      - type: archive
+        url: https://deb.debian.org/debian/pool/main/c/cabextract/cabextract_1.11.orig.tar.gz
+        sha256: b5546db1155e4c718ff3d4b278573604f30dd64c3c5bfd4657cd089b823a3ac6
+        x-checker-data:
+          type: html
+          url: https://ftp.debian.org/debian/pool/main/c/cabextract/
+          version-pattern: cabextract_(\d[\d\.]+\d)\.orig\.tar\.gz
+          url-template: https://deb.debian.org/debian/pool/main/c/cabextract/cabextract_$version.orig.tar.gz
+
+  # Replacement fonts that Windows expects in many instances (Arial, Times New Roman, Courier)
+  - name: liberation-fonts-ttf
+    sources:
+      - type: archive
+        url: https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz
+        sha256: 7191c669bf38899f73a2094ed00f7b800553364f90e2637010a69c0e268f25d0
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://github.com/liberationfonts/liberation-fonts/releases                                                 # Use this file to...
+          pattern: (https://github\.com/liberationfonts/liberation-fonts/files/\d+/liberation-fonts-ttf-([\d\.]+)\.tar\.gz) # Search for this regex pattern and compare it to source to see if there is a newer version
+    buildsystem: simple
+    build-commands:
+      - |
+        # Make directory paths for Liberation fonts
+        mkdir -p ${FLATPAK_DEST}/share/fonts/liberation-mono-fonts/
+        mkdir -p ${FLATPAK_DEST}/share/fonts/liberation-sans-fonts/
+        mkdir -p ${FLATPAK_DEST}/share/fonts/liberation-serif-fonts/
+
+        # Install Liberation fonts
+        install -Dm644 LiberationMono-Bold.ttf -t ${FLATPAK_DEST}/share/fonts/liberation-mono-fonts/
+        install -Dm644 LiberationMono-BoldItalic.ttf -t ${FLATPAK_DEST}/share/fonts/liberation-mono-fonts/
+        install -Dm644 LiberationMono-Italic.ttf -t ${FLATPAK_DEST}/share/fonts/liberation-mono-fonts/
+        install -Dm644 LiberationMono-Regular.ttf -t ${FLATPAK_DEST}/share/fonts/liberation-mono-fonts/
+
+        install -Dm644 LiberationSans-Bold.ttf -t ${FLATPAK_DEST}/share/fonts/liberation-sans-fonts/
+        install -Dm644 LiberationSans-BoldItalic.ttf -t ${FLATPAK_DEST}/share/fonts/liberation-sans-fonts/
+        install -Dm644 LiberationSans-Italic.ttf -t ${FLATPAK_DEST}/share/fonts/liberation-sans-fonts/
+        install -Dm644 LiberationSans-Regular.ttf -t ${FLATPAK_DEST}/share/fonts/liberation-sans-fonts/
+
+        install -Dm644 LiberationSerif-Bold.ttf -t ${FLATPAK_DEST}/share/fonts/liberation-serif-fonts/
+        install -Dm644 LiberationSerif-BoldItalic.ttf -t ${FLATPAK_DEST}/share/fonts/liberation-serif-fonts/
+        install -Dm644 LiberationSerif-Italic.ttf -t ${FLATPAK_DEST}/share/fonts/liberation-serif-fonts/
+        install -Dm644 LiberationSerif-Regular.ttf -t ${FLATPAK_DEST}/share/fonts/liberation-serif-fonts/
+
+  # Vulkan based DirectX 3, 5, 6, 7 (replaced with ddraw.dll)
+  # Note: This module just places the D7VK ddraw.dll in ${FLATPAK_DEST}/share/d7vk/ and child Apps will have to copy/replace the default Wine ddraw.dll with this to make use of D7VK
+  - name: d7vk
+    sources:
+      - type: archive
+        url: https://github.com/WinterSnowfall/d7vk/releases/download/v2.4/d7vk-v2.4.zip
+        sha256: 41a1c803b651390e348b057be084defd01489f343f3ee534281e578b5e80363e
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://github.com/WinterSnowfall/d7vk/releases                                                # Use this file to...
+          version-pattern: /WinterSnowfall/d7vk/releases/tag/v(\d[\d\.]+\d)                                   # Search for this regex pattern
+          url-template: https://github.com/WinterSnowfall/d7vk/releases/download/v$version/d7vk-v$version.zip # Compare this file (found using regex match from above) to the source to see if there is a newer version
+
+      # Script that switches a Wine prefix to the default Wine ddraw.dll instead of D7VK ddraw.dll (Optionally ran by child Apps to update their already initialized Wine prefix)
+      - type: file
+        path: Scripts/D7VKToWine.sh
+
+      # Script that switches a Wine prefix to the D7VK ddraw.dll instead of default Wine ddraw.dll (Optionally ran by child Apps to update their already initialized Wine prefix)
+      - type: file
+        path: Scripts/WineToD7VK.sh
+    buildsystem: simple
+    build-commands:
+      - |
+        mkdir -p ${FLATPAK_DEST}/share/d7vk/                 # Make directory path for D7VK
+        cp -a x32 ${FLATPAK_DEST}/share/d7vk/                # Copy 32bit D7VK keeping file permissions the same
+
+        install -Dm755 D7VKToWine.sh -t ${FLATPAK_DEST}/bin/ # Install script for switching Wine prefix to default Wine instead of D7VK
+        install -Dm755 WineToD7VK.sh -t ${FLATPAK_DEST}/bin/ # Install script for switching Wine prefix to D7VK instead of default Wine
+
+  # Vulkan based DirectX 8, 9, 10, 11 (replaced with dlls)
+  # Note: This module just places the DXVK dlls in ${FLATPAK_DEST}/share/dxvk/ and child Apps will have to copy/replace the default Wine dlls with these to make use of DXVK
+  - name: dxvk
+    sources:
+      - type: archive
+        url: https://github.com/doitsujin/dxvk/releases/download/v3.1.1/dxvk-3.1.1.tar.gz
+        sha256: 40565b4a724aadc4433fa4e010b4b23916d9b1f1baeee64e17186db94f54e608
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://github.com/doitsujin/dxvk/tags                                                      # Use this file to...
+          version-pattern: /doitsujin/dxvk/releases/tag/v(\d[\d\.]+\d)                                     # Search for this regex pattern
+          url-template: https://github.com/doitsujin/dxvk/releases/download/v$version/dxvk-$version.tar.gz # Compare this file (found using regex match from above) to the source to see if there is a newer version
+
+      # Script that switches a Wine prefix to the default Wine dlls instead of DXVK dlls (Optionally ran by child Apps to update their already initialized Wine prefix)
+      - type: file
+        path: Scripts/DXVKToWine.sh
+
+      # Script that switches a Wine prefix to the DXVK dlls instead of default Wine dlls (Optionally ran by child Apps to update their already initialized Wine prefix)
+      - type: file
+        path: Scripts/WineToDXVK.sh
+    buildsystem: simple
+    build-commands:
+      - |
+        mkdir -p ${FLATPAK_DEST}/share/dxvk/                 # Make directory path for DXVK
+        cp -a x32 ${FLATPAK_DEST}/share/dxvk/                # Copy 32bit DXVK keeping file permissions the same
+        cp -a x64 ${FLATPAK_DEST}/share/dxvk/                # Copy 64bit DXVK keeping file permissions the same
+
+        install -Dm755 DXVKToWine.sh -t ${FLATPAK_DEST}/bin/ # Install script for switching Wine prefix to default Wine instead of DXVK
+        install -Dm755 WineToDXVK.sh -t ${FLATPAK_DEST}/bin/ # Install script for switching Wine prefix to DXVK instead of default Wine
+
+  # Old Vulkan (1.1/1.2) based DirectX 3, 5, 6, 7, 8, 9, 10, 11 (replaced with dlls) (for old GPUS that don't have access to Vulkan 1.3+)
+  # Note: This module just places the DXVK-Sarek dlls in ${FLATPAK_DEST}/share/dxvk-sarek/ and child Apps will have to copy/replace the default Wine dlls with these to make use of DXVK-Sarek
+  - name: dxvk-sarek
+    sources:
+      # TODO: Keep tabs that the URL below is good and doesn't change (Recently switched to *-dyasync and may change naming conventions later)
+      - type: archive
+        url: https://github.com/pythonlover02/DXVK-Sarek/releases/download/v1.12.0/dxvk-sarek-dyasync-v1.12.0.tar.gz
+        sha256: 91cb8e6aacc4db5983a7e0a6d4428d4530621830e9f31b4ef99602eb30ebb22f
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://github.com/pythonlover02/DXVK-Sarek/tags                                                                     # Use this file to...
+          version-pattern: /pythonlover02/DXVK-Sarek/releases/tag/v(\d[\d\.]+\d)                                                    # Search for this regex pattern
+          url-template: https://github.com/pythonlover02/DXVK-Sarek/releases/download/v$version/dxvk-sarek-dyasync-v$version.tar.gz # Compare this file (found using regex match from above) to the source to see if there is a newer version
+
+      # Script that switches a Wine prefix to the default Wine dlls instead of DXVK-Sarek dlls (Optionally ran by child Apps to update their already initialized Wine prefix)
+      - type: file
+        path: Scripts/DXVK-SarekToWine.sh
+
+      # Script that switches a Wine prefix to the DXVK-Sarek dlls instead of default Wine dlls (Optionally ran by child Apps to update their already initialized Wine prefix)
+      - type: file
+        path: Scripts/WineToDXVK-Sarek.sh
+    buildsystem: simple
+    build-commands:
+      - |
+        mkdir -p ${FLATPAK_DEST}/share/dxvk-sarek/                 # Make directory path for DXVK-Sarek
+        cp -a x32 ${FLATPAK_DEST}/share/dxvk-sarek/                # Copy 32bit DXVK-Sarek keeping file permissions the same
+        cp -a x64 ${FLATPAK_DEST}/share/dxvk-sarek/                # Copy 64bit DXVK-Sarek keeping file permissions the same
+
+        install -Dm755 DXVK-SarekToWine.sh -t ${FLATPAK_DEST}/bin/ # Install script for switching Wine prefix to default Wine instead of DXVK-Sarek
+        install -Dm755 WineToDXVK-Sarek.sh -t ${FLATPAK_DEST}/bin/ # Install script for switching Wine prefix to DXVK-Sarek instead of default Wine
+
+  # Vulkan based DirectX 12 (replaced with dlls)
+  # Note: This module just places the VKD3D-Proton dlls in ${FLATPAK_DEST}/share/vkd3d-proton/ and child Apps will have to copy/replace the default Wine dlls with these to make use of VKD3D-Proton
+  - name: vkd3d-proton
+    sources:
+      - type: archive
+        url: https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v3.1/vkd3d-proton-3.1.tar.zst
+        sha256: b85ea8219b71093a3924913dd7aae6172333dc0c069983ed510816d67f02120b
+        # TODO: Examine whether it's worth regex pattern matching on bugfix tags like v3.0a, for now this only updates on numbered releases
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://github.com/HansKristian-Work/vkd3d-proton/tags                                                               # Use this file to...
+          version-pattern: /HansKristian-Work/vkd3d-proton/releases/tag/v(\d[\d\.]+\d)                                              # Search for this regex pattern
+          url-template: https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v$version/vkd3d-proton-$version.tar.zst # Compare this file (found using regex match from above) to the source to see if there is a newer version
+
+      # Script that switches a Wine prefix to the default Wine dlls instead of VKD3D-Proton dlls (Optionally ran by child Apps to update their already initialized Wine prefix)
+      - type: file
+        path: Scripts/VKD3D-ProtonToWine.sh
+
+      # Script that switches a Wine prefix to the VKD3D-Proton dlls instead of default Wine dlls (Optionally ran by child Apps to update their already initialized Wine prefix)
+      - type: file
+        path: Scripts/WineToVKD3D-Proton.sh
+    buildsystem: simple
+    build-commands:
+      - |
+        mkdir -p ${FLATPAK_DEST}/share/vkd3d-proton/                 # Make directory path for VKD3D-Proton
+        cp -a x86 ${FLATPAK_DEST}/share/vkd3d-proton/                # Copy 32bit VKD3D-Proton keeping file permissions the same
+        cp -a x64 ${FLATPAK_DEST}/share/vkd3d-proton/                # Copy 64bit VKD3D-Proton keeping file permissions the same
+
+        install -Dm755 VKD3D-ProtonToWine.sh -t ${FLATPAK_DEST}/bin/ # Install script for switching Wine prefix to default Wine instead of VKD3D-Proton
+        install -Dm755 WineToVKD3D-Proton.sh -t ${FLATPAK_DEST}/bin/ # Install script for switching Wine prefix to VKD3D-Proton instead of default Wine
+
+  # For enabling Discord Rich Presence with Wine apps
+  - name: rpc-bridge
+    sources:
+      - type: git
+        url: https://github.com/EnderIce2/rpc-bridge.git
+        tag: v1.4.1.3
+        commit: 6aa60772a5241c7bd1b8d38f026b2a5168e0f93c
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^v(\d[\d\.]+\d)$ # Regex pattern that matches latest git tag and compares it to source
+    build-options:
+      prepend-path: /usr/lib/sdk/mingw-w64/bin # /usr/lib/sdk/mingw-w64/bin contains x86_64-w64-mingw32-gcc and i686-w64-mingw32-gcc compilers from sdk-extension org.freedesktop.Sdk.Extension.mingw-w64
+    buildsystem: simple
+    build-commands:
+      - |
+        make                                           # Build using the number of available cores minus 2
+        install -Dm755 build/* -t ${FLATPAK_DEST}/bin/ # Install all build files
+
+  # Python3 module (Mandatory gtk-doc dependency)
+  - name: pygments
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl
+        sha256: 2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+        x-checker-data:
+          type: pypi               # Check pypi repo...
+          name: pygments           # For pygments...
+          packagetype: bdist_wheel # Wheel download
+    buildsystem: simple
+    build-commands:
+      - |
+        pip3 install --no-index --find-links="file://${PWD}" --prefix=${FLATPAK_DEST} pygments
+
+  # For generating C documentation (Mandatory libgsf dependency)
+  - name: gtk-doc
+    sources:
+      - type: git
+        url: https://gitlab.gnome.org/GNOME/gtk-doc
+        tag: 1.37.0
+        commit: 1e7f700db7882b7e25e8957c7b8f5dede5b4b81a
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^(\d[\d\.]+\d)$ # Regex pattern that matches latest git tag and compares it to source
+    config-opts:
+      - -Dtests=false
+    buildsystem: meson
+
+  # For handling different structured file formats (Mandatory msitools dependency)
+  - name: libgsf
+    sources:
+      - type: git
+        url: https://gitlab.gnome.org/GNOME/libgsf
+        tag: LIBGSF_1_14_60
+        commit: bdca57b95846f35103f948c58c0d93ff081d4892
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^LIBGSF_(\d[\d\_]+\d)$ # Regex pattern that matches latest git tag and compares it to source
+
+  # For extracting files from msi executables
+  - name: msitools
+    sources:
+      - type: git
+        url: https://gitlab.gnome.org/GNOME/msitools
+        tag: v0.106
+        commit: 279a1d54ad58a4f5593462ffd607c663f60a32a1
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^v(\d[\d\.]+\d)$ # Regex pattern that matches latest git tag and compares it to source
+    build-options:
+      prepend-path: /usr/lib/sdk/vala/bin/           # Contains vala binary
+      prepend-ld-library-path: /usr/lib/sdk/vala/lib # Contains vala libraries
+    buildsystem: meson
+
+  # For extracting icons from exes
+  - name: icoutils
+    sources:
+      - type: archive
+        url: https://download.savannah.gnu.org/releases/icoutils/icoutils-0.32.3.tar.bz2
+        sha256: 17abe02d043a253b68b47e3af69c9fc755b895db68fdc8811786125df564c6e0
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://download.savannah.gnu.org/releases/icoutils/ # Use this file to...
+          pattern: (icoutils-(\d[\d\.]+\d).tar.bz2)                 # Search for this regex pattern and compare it to source to see if there is a newer version
+      - type: patch
+        path: Patches/icoutils-gcc15.patch
+
+  # For converting icons to PNGs and SVGs
+  - name: imagemagick
+    sources:
+      - type: git
+        url: https://github.com/ImageMagick/ImageMagick.git
+        tag: 7.1.2-36
+        commit: dcec873ede2912a1b045a50fd54cd138ee5f3fa4
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^(\d[\d\.]+\d-\d+)$ # Regex pattern that matches latest git tag and compares it to source
+
+  # For converting icons to SVGs (An optional ImageMagick delegate)
+  # TODO: Find a way to convert to SVG without loosing color
+  - name: potrace
+    sources:
+      - type: archive
+        url: https://potrace.sourceforge.net/download/1.16/potrace-1.16.tar.gz
+        sha256: be8248a17dedd6ccbaab2fcc45835bb0502d062e40fbded3bc56028ce5eb7acc
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: html
+          url: https://potrace.sourceforge.net/                                                   # Use this file to...
+          version-pattern: /potrace-(\d[\d\.]+\d).tar.gz                                          # Search for this regex pattern
+          url-template: https://potrace.sourceforge.net/download/$version/potrace-$version.tar.gz # Compare this file (found using regex match from above) to the source to see if there is a newer version
+
+  # For upscaling images
+  - name: upscayl
+    sources:
+      - type: archive
+        url: https://github.com/upscayl/upscayl/releases/download/v2.15.0/upscayl-2.15.0-linux.zip
+        sha256: 3a43bfa80ba10a5ec1dcbbec9e6620b465f6aa541b7280b6bbabf8e306b67053
+        x-checker-data: # Checks for a newer version when org.flathub.flatpak-external-data-checker is ran on this file
+          type: git
+          tag-pattern: ^v(\d[\d\.]+\d)$ # Regex pattern that matches latest git tag and compares it to source
+        dest: upscayl
+    buildsystem: simple
+    build-commands:
+      - |
+        mv upscayl/bin/* ${FLATPAK_DEST}/bin
+        mv upscayl/models ${FLATPAK_DEST}/bin
+
+  # Metainfo files
+  - name: metainfo
+    sources:
+      - type: file
+        path: org.wine.Sdk.metainfo.xml
+
+      - type: file
+        path: org.wine.Platform.metainfo.xml
+    buildsystem: simple
+    build-commands:
+      - |
+        install -Dm644 org.wine.Sdk.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo/      # Install SDK metainfo
+        install -Dm644 org.wine.Platform.metainfo.xml -t ${FLATPAK_DEST}/share/metainfo/ # Install Platform metainfo
+# Cleanup left over build files and other uneeded files
+cleanup:
+  - '*.a'                               # Static libraries
+  - '*.la'                              # Libtool archives
+  - /share/drirc.d                      # XML configuration files for Mesa
+  - /share/docs                         # Documentation files
+  - /share/et                           # Error table files
+  - /share/examples                     # Example programs or configurations
+  - /share/man                          # Man pages
+  - /include                            # Header files
+  - /lib/pkgconfig                      # Package config files
+  - /lib/debug                          # Debug files
