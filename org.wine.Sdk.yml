@@ -306,7 +306,8 @@ modules:
     sources:
       - type: git
         url: https://github.com/FEX-Emu/FEX.git
-        tag: FEX-2608
+        tag: FEX-2611.1
+        commit: 4f9c1f1e36443d22d7655477e34f51b95b685bf1
         submodules: true
         x-checker-data:
           type: git
